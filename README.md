@@ -12,7 +12,7 @@ Agents-Week-2026/
 │   ├── Lecture 2/     — Memory and Guardrails
 │   ├── Lecture 3/     — AI Agent Workflow, Multi-Agent Systems
 │   ├── Lecture 4/     — Agent Evaluation: From Metrics to Managed Quality
-│   └── Lecture 5/     — (продвинутые темы)
+│   └── Lecture 5/     — Production Engineering for LLM Agents
 ├── Отборочный контест/
 │   ├── Task 1/
 │   ├── Task 2/
@@ -28,9 +28,9 @@ Agents-Week-2026/
 | 1.1 | [Intro to AI Agents & LLM](Лекции/Lecture%201.1/) | Zaytseva Alena, AI Lead @ Yandex Lavka | Конспект, 2 Jupyter-ноутбука |
 | 1.2 | [Tools & MCP](Лекции/Lecture%201.2/) | Zaytseva Alena, AI Lead @ Yandex Lavka | Конспект, Jupyter-ноутбук |
 | 2 | [Memory and Guardrails](Лекции/Lecture%202/) | Kirill Mishchenko, Yandex Browser ML Team Lead | Конспект, Jupyter-ноутбук |
-| 3 | [AI Agent Workflow & Multi-Agent Systems](Лекции/Lecture%203/) | — | Конспект, практический ноутбук |
-| 4 | [Agent Evaluation](Лекции/Lecture%204/) | — | Конспект, практический ноутбук |
-| 5 | [Продвинутые темы](Лекции/Lecture%205/) | — | Видео лекций |
+| 3 | [AI Agent Workflow & Multi-Agent Systems](Лекции/Lecture%203/) | Sofya Proskurina, AI Agents Platform @ Yandex Lavka | Конспект, практический ноутбук |
+| 4 | [Agent Evaluation](Лекции/Lecture%204/) | Sergey Kuptsov, Agent Solutions in Alice & Smart Devices | Конспект, практический ноутбук |
+| 5 | [Production Engineering for LLM Agents](Лекции/Lecture%205/) | Daniil Artamonov (Head of AI Platform), Kirill Vlasov (PM, AI Studio Yandex Cloud) | Конспект, видео лекций |
 
 ## Краткое содержание курса
 
@@ -48,7 +48,10 @@ Agents-Week-2026/
 Практический семинар: построение MAS для клиентского сервиса авиакомпании. Single Agent (ReAct/TAO loop) → Hierarchical MAS (Coordinator + специализированные агенты) → MAS + Critic (Reflexion pattern). Benchmark: Single Agent 6.0/10, MAS 9.3/10, MAS+Critic 10.0/10.
 
 ### Лекция 4 — Agent Evaluation
-Полный цикл eval-системы: корзина задач, три грейдера (state_grader, policy_grader, LLM-as-Judge), Iron User (симулированный пользователь для multi-turn оценки), человеческая разметка, итеративное улучшение LLM-судьи (v1→v5). Prompt engineering > model scaling.
+Eval как отдельная инженерная дисциплина: 4 компонента (корзина задач, инфраструктура прогонов, критерии качества, грейдинг). Iron User — симулятор пользователя для multi-turn тестирования. Три типа грейдеров (code-based, human, LLM-as-a-Judge). Метрики стабильности Pass@k / Pass^k. Cohen's kappa для калибровки судьи. Типы агентов и их eval-специфика. Культура качества в production.
+
+### Лекция 5 — Production Engineering for LLM Agents
+7 проблем при переходе агента в production (slow, expensive, fails silently, non-reproducible, black box, insecure, doesn't scale). Observability с дня 1 (структурированный логинг, trace hierarchy, LangFuse/LangSmith). Оценка качества: offline vs online eval, DSPy для автоматической оптимизации (62% → 91%). Cost optimization: формулы CPS/CPR, model router, кеширование. Security: токены вместо user_id, tool permissions. Canary deployment. Архитектурные паттерны (Anthropic workflows, framework comparison). Production checklist.
 
 ## Отборочный контест
 

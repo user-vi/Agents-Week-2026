@@ -5,495 +5,425 @@
 - ▶️ [Смотреть лекцию 5.2](https://www.youtube.com/live/UxgjgvI_wKY) - Kirill Vlasov (Product Manager, AI Studio Yandex Cloud)
 
 ---
+## ACT 1: Прототип — 7 проблем
 
-## 📋 Содержание
-1. [7 Проблем в Production](#-7-problems)
-2. [Observability - Наблюдаемость](#-observability)
-3. [Evaluation - Оценка качества](#-evaluation)
-4. [Cost Optimization - Оптимизация стоимости](#-cost-optimization)
-5. [Security & Deployment - Безопасность и развертывание](#-security--deployment)
-6. [Formalization & Decision Trees](#-formalization--decision-trees)
+### Стартовая точка: FlightAgent
 
----
+Типичный агент состоит из трёх компонентов: LLM (мозг — генерирует ответы и решения), Tools (руки — search_flights, book_ticket, get_weather) и Loop (позвоночник — цикл Observe → Think → Act → Observe). Прекрасно работает в Jupyter, но к продакшену не готов.
 
-## 🚨 7 Problems in Production
+### 7 проблем прототипа
 
-При переходе агента из прототипа в production возникают 7 критических проблем:
+**1. Медленный.** Обычный Google-запрос — 200 мс, агент — 5–10 секунд (3 LLM-вызова × 1с + инструменты). Пользователи не привыкли ждать.
 
-### 1. **Slow (5-10 секунд)**
-- Агент требует 3 LLM вызова × 1 сек + tools
-- Пользователи привыкли к 200ms ответам (Google)
-- **Решение**: параллельные вызовы, streaming, оптимизация шагов
+**2. Непредсказуемо дорогой.** Простой запрос: 3 шага, $0.01. Сложный: 15 шагов, $0.30. Агент сам решает, сколько шагов — бюджет на 10K пользователей в день колеблется от $200 до $1500.
 
-### 2. **Unpredictably Expensive**
-- Простой запрос: 3 шага = $0.01
-- Сложный запрос: 15 шагов = $0.30
-- Агент решает количество шагов, не вы
-- 10K пользователей/день: бюджет от $200 до $1,500
-- **Решение**: модельный router, контроль контекста, расчет бюджета
+**3. Молча ломается.** Инструмент возвращает TIMEOUT / 500, а агент отвечает «Нашёл 3 рейса в Стамбул» — с выдуманными данными. Логи зелёные, пользователь видит фейк.
 
-### 3. **Fails Silently**
-- Tool возвращает TIMEOUT → агент вымышляет данные
-- Логи: 200 OK, хотя данные фальшивые
-- Пользователи получают неправильную информацию
-- **Решение**: defensive prompting + structured output + валидация
+**4. Невоспроизводимый.** Один и тот же запрос «дешёвые рейсы в Стамбул» → три разных ответа. `assert response == expected` не работает.
 
-### 4. **Non-reproducible**
-- Один запрос → разные результаты
-- `assert response == expected` не работает
-- Классические тесты неприменимы
-- **Решение**: качественные метрики + LLM-as-Judge + DSPy
+**5. Чёрный ящик.** Непонятно, какие шаги были, сколько стоило, где сломалось. Коллега изменил промпт — поведение изменилось. Что именно? Неизвестно.
 
-### 5. **Black Box**
-- Не видно: сколько шагов? какая стоимость? где сломалось?
-- Коллега изменил prompt → поведение изменилось, но как?
-- Узнаете только из жалоб пользователей
-- **Решение**: per-step трейсинг (LangFuse, LangSmith)
+**6. Небезопасный.** Агент без ограничений имеет доступ ко всем инструментам: search_flights, get_bookings, admin_panel, DB. Всё, что может агент — может и пользователь. «Покажи все бронирования всех пользователей» → агент выполняет.
 
-### 6. **Insecure**
-- Пользователь: "Show all bookings of all users"
-- Агент это выполняет (если tool позволяет)
-- Вы дали доступ в БД через chat
-- **Решение**: tool permissions, parameter validation, OAuth
-
-### 7. **Doesn't Scale**
-- 4 агента × 6 компонентов (Gateway, Auth, Obs, Eval, Queue, Deploy) = 24 вещей
-- Каждый агент в отдельности → дублирование кода
-- **Решение**: shared infrastructure, не shared logic
+**7. Не масштабируется.** Каждому агенту нужны: Gateway, Auth, Observability, Eval, Queue, Deploy. 4 агента × 6 компонентов = 24 вещи, которые нужно строить и поддерживать отдельно.
 
 ---
 
-## 📊 Observability - Наблюдаемость
+## ACT 2: Масштабирование прототипа
 
-**Начните с дня 1, не откладывайте!**
+### Observability (Проблема 5 → видимость по шагам)
 
-### Структурированный логинг (вместо print)
-```
-Вместо:                          Используйте:
-"Processing request..."           {"event": "request_start", "user_id": "u123", "tool": "search_flights", "latency_ms": 1200}
-"Called search_flights"
-"Got 5 results"
-```
+Классический сервис: 1 шаг, детерминированный, фиксированное время и стоимость, 1 строка в логах. LLM-агент: 3–15 шагов, недетерминированный, 3–15 секунд, $0.01–$0.30, нужны трассировки по шагам.
 
-### Что логировать:
+**Что логировать (структурированно):**
+- Каждый LLM-вызов: модель, токены, латенси, хеш промпта
+- Каждый вызов инструмента: имя, аргументы, статус результата, латенси
+- Каждое решение: почему агент выбрал этот инструмент / этот ответ
+- Ошибки: полный контекст — что пробовали, что упало
 
-**Каждый LLM вызов:**
-- Модель, токены, latency, хэш prompt
+**Иерархия трассировок:** Session (разговор пользователя) → Trace (отдельный запрос) → Step (шаг) → внутри шага: LLM Call + Tool Call.
 
-**Каждый Tool вызов:**
-- Имя tool, аргументы, статус результата, latency
-
-**Каждое решение:**
-- Почему агент выбрал этот инструмент/ответ
-
-**Ошибки:**
-- Полный контекст: что было попробовано, что не сработало
-
-### Trace Hierarchy (уровни логирования)
-```
-Session (вся комната разговора)
-  └─ Request #1
-      ├─ LLM Call 0.4s | 320 tok
-      ├─ Tool: search_flights (1.2s | ✓)
-      └─ LLM Call 2 (0.8s | 1400 tok)
-  └─ Request #2
-```
-
-### Ключевые метрики для агентов
+**Ключевые метрики:**
 
 | Метрика | Почему важна |
-|---------|-------------|
-| Latency (p50, p95) | p95 > 10s → пользователи уходят |
-| Steps per request | Больше шагов = больше $ + latency |
-| Tokens per request | Прямо влияет на стоимость |
-| Tool success rate | Падение → API сломалась или bad params |
-| Task success rate | **Единственная метрика, которую чувствуют пользователи** |
-| Error rate | Spike → что-то сломалось, silent errors - хуже |
+|---|---|
+| Latency (p50, p95) | Пользователь ждёт столько. p95 > 10с → пользователи уходят |
+| Steps per request | Больше шагов = больше $, больше латенси, больше циклов |
+| Tokens per request | Напрямую определяет стоимость. Растёт с накоплением контекста |
+| Tool success rate | Падение → сломался внешний API или плохие параметры |
+| Task success rate | Единственная метрика, которую чувствует пользователь |
+| Error rate | Всплеск → что-то сломалось. Тихие ошибки хуже |
 
-### Инструменты для трейсинга
-- **LangFuse** (MIT, self-hosted) - traces + evals + cost в одном
-- **LangSmith** (SaaS, LangChain) - deep integration
-- **Arize Phoenix** - ML monitoring + LLM, drift detection
-- **Braintrust** - eval-first, CI/CD gates
-- **Helicone** - быстрый старт + cost tracking
+**Алерты важнее дашбордов:**
+- Latency p95 > 10с в течение 5 мин → Slack
+- Стоимость за день > бюджет × 1.5 → ревью трейсов
+- Error rate > 5% за 10 мин → PagerDuty
 
----
-
-## 📈 Evaluation - Оценка качества
-
-### Offline vs Online Eval
-
-| | Offline | Online |
-|---|---------|--------|
-| Входные данные | Ваш тест-набор | Real traffic |
-| Expected output | Известен | Неизвестен |
-| Когда | До deploy (CI/CD) | После deploy (continuous) |
-| Ловит | Регрессии, известные ошибки | Drift, edge cases, реальное распределение |
-
-### Пример: Score 62% - где копать?
-
-```
-62% / 8 из 20 failing
-
-├─ Wrong tool (1 case) → called book instead of search
-├─ Hallucination (2 cases) → price not from API
-├─ Didn't clarify (3 cases) → no date → searched randomly ← MAIN BUCKET (38%)
-├─ Safety (2 cases) → Booked without confirmation
-```
-
-**Главный баг = 38% не спросил дату**  
-Это **не проблема prompt** → нужны few-shot примеры, DSPy
-
-### Quality Levers (рычаги улучшения)
-
-**Быстрые wins (1-3 дня):**
-1. **Tool Descriptions + Structured Output**
-   - JSON schema предотвращает hallucination в имена полей
-   
-2. **Few-Shot Examples** (+10-15% качество)
-   - LLM учится на примерах, не на правилах
-   
-3. **Chain-of-Thought** (+10-20% качество)
-   - "Think step by step" для сложных запросов
-
-**Тяжелая артиллерия:**
-4. **DSPy** (+20-30% качество)
-   - Автоматическая оптимизация prompt + примеры
-   - Нужны: 20 test cases + метрика + optimizer
-   
-5. **Fine-tuning** (последняя мера)
-   - Тренируем саму модель
-   - Нужны: 1000+ labeled examples + GPU time
-
-### DSPy Workflow: 62% → 91% за 2 минуты
-```
-BEFORE: baseline prompt 62%
-BootstrapFewShot: +3 примера → 84% (+22pp)
-MIPRO: переписывает инструкции → 91% (+29pp)
-```
+**Инструменты:** LangFuse (трассировки + эвалы, open-source, self-hosted) и Grafana + Prometheus (дашборды + алерты, open-source).
 
 ---
 
-## 💰 Cost Optimization - Оптимизация стоимости
+### Evaluation (Проблема 4 → анализ ошибок + рычаги качества)
 
-### CPS & CPR (Cost formulas)
+**Шаг 1 — Анализ ошибок.** Например, из 20 тестов 8 провалены (62%). Категоризация: неправильный инструмент (1), галлюцинация (2), не уточнил (3), безопасность (2). Главный бакет: «Не уточнил» — 3/8 ошибок. Это не проблема промпта, нужен few-shot пример.
+
+**Шаг 2 — Рычаги качества (Quick Wins):**
+- **Tool Descriptions + Structured Output** — LLM выбирает инструмент по описанию; JSON-схема заставляет выдавать валидную структуру
+- **Few-Shot Examples** — 3–5 пар вход/выход в системном промпте, +10–15% качества
+- **Chain-of-Thought** — «Think step by step», +10–20% качества
+
+**Шаг 3 — Тяжёлая артиллерия:**
+- **DSPy** — алгоритм находит лучший промпт, автогенерация few-shot, перезапись инструкций. Нужно: 20 тест-кейсов + метрика. Результат: +20–30% качества
+- **Fine-tuning** — обучение самой модели. Нужно: 1000+ размеченных примеров. Только если 1–4 не хватает
+
+**DSPy: три компонента** — Signature (что делать), Metric (как измерять), Optimizer (как искать — Bootstrap / MIPRO). Пример: baseline 62% → BootstrapFewShot 84% → MIPRO 91%.
+
+**Multi-Agent Eval: три уровня:**
+- Level 1: E2E Basket — 20 запросов + ожидаемый вывод (хватает в 80% случаев)
+- Level 2: Trace Debug — E2E падает → трейс → найти под-агент
+- Level 3: Assertions — без golden set: валидный JSON, цены > 0, нет бронирования без подтверждения
+
+**Промпты как код (CI Pipeline).** Промпты в git: каждое изменение = PR + ревью, diff, откат одной командой, CI: eval запускается на каждый PR. Если score ≥ baseline → merge + deploy, иначе → блок.
+
+---
+
+### Cost Optimization (Проблема 2 → роутер, контроль контекста, расчёт бюджета)
+
+**Лестница стоимости (за 1K запросов):**
+
+| Уровень | Пример | Время | Стоимость |
+|---|---|---|---|
+| Код | Сортировка, валидация | 0 мс | $0 |
+| Классический ML | Классификатор интентов | 5 мс | $0 |
+| LLM (один вызов) | Парсинг запроса | 0.5с | $0.003 |
+| LLM + loop | Многошаговое рассуждение | 5с | $0.05 |
+
+**Формула расчёта:** `users × reqs × steps × tokens × price`
+
+Пример: 1K × 3 × 4.2 × 2400 = 30M tok/day
+
+| Конфигурация | В день | В месяц |
+|---|---|---|
+| 100% Large | $450 | $13,500 |
+| 100% Medium | $90 | $2,700 |
+| 100% Small | $7.50 | $225 |
+| Router 70/20/10 | ~$55 | ~$1,650 |
+| Router 80/15/5 | ~$35 | $1,050 |
+
+Large → Router 80/15/5 = **13× экономия** = $12K/мес = $144K/год.
+
+**Context Growth — скрытый пожиратель бюджета.** 80% токенов = пересылка предыдущих шагов. Решения: суммаризация, скользящее окно, компактный системный промпт.
+
+**4 рычага оптимизации:**
+1. **Router** — 10–13× экономия. 70% FAQ → Small, 20% стандарт → Medium, 10% сложные → Large
+2. **Speed** — −30–40% латенси, −30% серверов. Параллельные инструменты, стриминг, меньше шагов через DSPy
+3. **Limits** — предсказуемый бюджет. Max steps (5–10), timeout (30–60с), детекция циклов
+4. **Scale** — 100K+ пользователей, −60% стоимость. Очередь + пул воркеров, три уровня кеширования
+
+**Model Router — реализация:**
+
+| Подход | Точность |
+|---|---|
+| Rules (if/else по длине + ключевым словам) | ~70% |
+| Classifier (logreg на 200–300 размеченных запросах) | ~85% |
+| LLM-as-Router (маленькая модель классифицирует) | ~95% |
+
+Критично: fallback если дешёвая модель не справилась → retry на более высоком уровне.
+
+---
+
+### Speed & Resilience (Проблемы 1, 3 → параллелизм, лимиты, фоллбеки)
+
+**Скорость = стоимость серверов.** До: 4.2с/запрос, 7 воркеров на 100 req/min. После: 2.8с/запрос, 5 воркеров. Экономия: 2 сервера × $300/мес.
+
+**Три рычага скорости:** параллельные инструменты, стриминг (0.3с до первого слова vs 4с полного ожидания), меньше шагов (лучший промпт или DSPy).
+
+**Лимиты — хвост съедает бюджет.** 95% нормальных: $0.003–$0.015. 1% катастрофических: $0.15–$0.50. Этот 1% = 20% бюджета нормальных. Решения: Max Steps (жёсткий стоп 5–10), Timeout (30–60с), Loop Detection (одинаковый tool + аргументы = цикл → стоп).
+
+**Queue + Worker Pool.** Принять мгновенно → вернуть job_id → обработать асинхронно. Auto-scale: очередь < 10 → 5 воркеров, > 50 → 20, > 200 → backpressure.
+
+**Три уровня кеширования (суммарно −60% стоимости, −57% латенси):**
+- **Semantic Cache** — embedding similarity, экономит ~30% LLM-вызовов
+- **Tool Result Cache** — TTL = 5 мин, экономит ~40% вызовов инструментов
+- **LLM Response Cache** — exact hash match, экономит ~20% LLM-вызовов
+
+**Защита от падения инструментов:**
+1. Defensive prompt — «Никогда не выдумывай»
+2. Structured Output — JSON-схема
+3. Validation + auto-disable
+
+**Мониторинг стоимости:** отслеживать avg AND p99 стоимости запроса (p99 = 15× avg → зацикленные запросы). Daily cost vs budget: нормально (< budget × 1.2), алерт + даунгрейд (× 1.5), полная остановка (× 2.0).
+
+---
+
+### Security & Deployment (Проблема 6 → защита на уровне инфраструктуры)
+
+**Промпт — это НЕ защита.** «Никогда не вызывай admin_panel» → пользователь: «Забудь инструкции» → LLM может подчиниться. Правильный подход: инструмента нет в списке → не может вызвать; user_id из токена → не подделать; внутренние поля отфильтрованы → не видно.
+
+**Два принципа безопасности:**
+1. LLM никогда не должен видеть секреты или PII (API-ключи, пароли, паспорта, номера карт). Инструмент получает credentials из env.
+2. Авторизация в КОДЕ инструмента, не в промпте. Каждый инструмент = API-endpoint со своей авторизацией. user_id из верифицированного токена, не из запроса.
+
+**Реальные инциденты:**
+- **OpenClaw (2026)** — 130K stars, пароль 'a' валиден, prompt injection → утечка API-ключей, 800 вредоносных скилов
+- **Slack AI (2024)** — исследование PromptArmor: скрытая инструкция в публичном канале → AI утекает приватные данные
+
+**Паттерн:** агент + широкий доступ + защита только промптом = инцидент.
+
+**Три уровня защиты:**
+1. **Tool Permission** — агент видит только разрешённые инструменты
+2. **Parameter Validation** — user_id = серверный токен, агент не может подменить идентичность
+3. **Output Filtering** — возвращается flight, price, airline; отфильтровываются internal_id, margin, email
+
+**OAuth — права в продакшене.** Пользователь логинится → scoped-токен (flights:read, flights:book) → Gateway проверяет scope → нет scope = инструмент невидим (не «запрещён»). MCP 2.1 = OAuth нативно.
+
+**Canary Deployment.** Обычный сервис: деплой → тесты прошли → готово. Агент: тесты прошли, но LLM ведёт себя иначе на живом трафике. Изменение промпта может молча ухудшить качество.
+
+Схема: 95% stable v2 + 5% canary v3 → сравнение метрик (latency, eval score, error rate, cost) → если quality drop > 10% → auto-rollback. Ramp up: 5% → 25% → 50% → 100%, каждый шаг — ждать 1 час и сравнивать метрики.
+
+---
+
+## ACT 3: Масштабирование системы
+
+**Когда нужна платформа:**
+
+| Кол-во агентов | Подход |
+|---|---|
+| 1 агент | Не нужна (overengineering) |
+| 2 агента | Copy-paste терпимо |
+| 3+ агента | Платформа окупается |
+
+Без платформы: 4 агента = 12 месяцев, баг исправляется в 4 местах. С платформой: 4 агента ≈ 5 месяцев, баг исправляется один раз.
+
+**Принцип: делить инфраструктуру, НЕ логику.** Каждый агент — свои промпты, логика, eval. Общее: LLM Gateway, Tool Registry, Auth/RBAC, Memory Store, Eval Pipeline, Queue + Cache.
+
+**Новый агент = промпт + инструменты из Registry + eval-кейсы → 1 неделя вместо 3 месяцев.**
+
+**Эволюция:**
+
+| Этап | Что есть | Масштаб |
+|---|---|---|
+| Prototype | ReAct + 3 tools, Jupyter, 7 проблем | 1 пользователь (вы) |
+| Production | + traces, eval, limits, security, canary | 100K пользователей |
+| Platform | + shared infra, 4+ агента | 1 неделя на нового агента |
+
+Каждый этап имеет смысл только после предыдущего.
+
+---
+
+## ACT 4: Формализация и деревья решений
+
+### Нужен ли вам агент?
+
+Три вопроса:
+- Нужна ли автономность? Если нет → Pipeline / workflow
+- Нужны ли внешние инструменты? Если нет → один LLM-вызов
+- Нужно ли многошаговое рассуждение? Если нет → Prompt chain
+
+### AI-агенты ≠ Программы
+
+| Программа | Агент |
+|---|---|
+| Одинаковый вход → одинаковый выход | Одинаковый вход → разный выход |
+| Юнит-тесты, binary pass/fail | Статистическое тестирование (94% success rate) |
+| Баги воспроизводимы | Ошибки могут не воспроизводиться |
+| Ship it → it works | Ship → monitor → iterate |
+| Инженер программирует поведение | Инженер проектирует среду |
+
+**AI Agents = ML + BackEnd**
+
+### Формализуй до кода
+
+Перед написанием кода — зафиксировать:
+- **Input** — что приходит (текст / голос / документ / структурированные данные)
+- **Output** — что выходит (ответ / действие / документ / API-вызов)
+- **Scope** — что агент делает и НЕ делает
+- **Success criteria** — как понять, что работает (метрика, не «вроде ок»)
+- **Edge cases** — что если вход мусор? Инструмент лежит?
+- **Human fallback** — когда передавать человеку?
+
+**Нет формализации → нет eval → нет продакшена. Только демо.**
+
+### Экономика агентов
+
+**Сначала определить ценность:** что делает человек сегодня, сколько стоит, сколько времени занимает. Что меняется с агентом (скорость / стоимость / качество / масштаб). Какой KPI улучшается.
+
+**Затем посчитать затраты:**
 
 ```
-Cost per Session (CPS):
-= (tokens × price_per_token) × avg_steps
-  + tool_call_costs
-  + infra_per_session
-  + human_review_cost × escalation_rate
+CPS = (tokens × price_per_token) × avg_steps
+    + tool_call_costs
+    + infra_per_session
+    + human_review_cost × escalation_rate
 
-Cost per Successful Resolution (CPR):
-= CPS / success_rate
+CPR = CPS / success_rate
 ```
 
-**Пример: Customer Support Agent**
-- 5 шагов × 1,000 tokens ≈ 5,000 input + 2,500 output
-- GPT-4o: $2.50/1M input, $10/1M output
-- LLM cost: ~$0.04/session
+**Пример: Customer Support Agent:**
+- 5 шагов, ~1000 токенов/шаг, GPT-4o
+- LLM cost: ~$0.04
 - Tool costs (API, DB): ~$0.005
 - Infrastructure: ~$0.005
 - Human review (10% escalation, $30/hr, 5 min): $0.25
 - **Total CPS: ~$0.30**
+- Человек: $2–6 за резолюцию → агент в **13 раз дешевле**
+- При 70% success: CPR = $0.43
+- При 50% success: CPR = $0.60 + rework cost
 
-**vs Human support:** $15–25/hr = $2–6 per resolution→ Агент 13x дешевле  
-**BUT:** CPR = $0.30 / success_rate  
-- При 70% успеха: $0.30 / 0.70 = **$0.43**
-- При 50% успеха: $0.30 / 0.50 = **$0.60** + rework costs
+**Когда агент НЕ окупается:**
+- Success rate ниже 60% (слишком много rework)
+- Объём менее 100 задач/месяц (не окупит dev cost)
+- Задачи слишком разнообразны (нужно 50 промптов вместо 1)
+- Стоимость ошибки высока (human verification съедает экономию)
 
-### 4 Рычага оптимизации
+### Качество — три столпа
 
-**1. Router - 10-13× экономия на LLM**
+1. **Prompt Engineering** — промпт = API-контракт между вами и моделью. Структура: role, context, instructions, constraints, tools, output format, examples. Версионирование и тестирование каждого изменения.
+2. **Evals** — систематическое измерение работоспособности агента. Тестовый набор, автоматический запуск, скоринг, гейтинг деплоев.
+3. **Tracing** — без трейсов не знаешь, что произошло между входом и выходом. Логировать каждый LLM-вызов, каждый вызов инструмента, каждый шаг рассуждения.
+
+### Offline vs Online Eval
+
+| | Offline | Online |
+|---|---|---|
+| Входные данные | Тестовый набор | Реальный трафик |
+| Ожидаемый вывод | Известен | Неизвестен |
+| Когда | До деплоя (CI/CD) | После деплоя (непрерывно) |
+| Ловит | Регрессии, известные ошибки | Дрифт, edge cases, реальное распределение |
+
+Методы online eval: LLM-as-judge, сигналы пользователей (thumbs up/down, повторные обращения, escalation rate), прокси-метрики (task completion rate, time to resolution, cost per session), A/B-тестирование.
+
+### Tracing Platforms
+
+| | Langfuse | LangSmith | Arize Phoenix | Braintrust | Helicone |
+|---|---|---|---|---|---|
+| Фокус | Tracing + prompt mgmt | Tracing + eval (LangChain) | ML monitoring + LLM | Eval-first + tracing | Gateway + cost tracking |
+| Open source | MIT, self-host | Нет (SaaS) | Да (OpenInference) | Нет | Частично |
+| Agent tracing | Multi-step, nested spans | Deep для LangChain/LangGraph | Session → trace → span | Nested spans, timeline | Basic |
+| Online eval | LLM-as-judge, custom scorers | LLM-as-judge, datasets | Drift detection, alerts | Scorers в CI | Нет |
+| Lock-in | Минимальный | Высокий (LangChain) | Минимальный | Средний | Минимальный |
+
+**Дерево решений:** LangChain → LangSmith, self-host → Langfuse, production drift → Arize Phoenix, eval gates в CI/CD → Braintrust, быстрый старт + cost tracking → Helicone.
+
+### Latency vs Quality vs Cost
+
+Треугольник компромиссов — нельзя оптимизировать всё одновременно.
+
+### Acceptance Pipeline
+
 ```
-70% FAQ → Small ($<$0.001)
-20% Standard → Medium (~$0.005)
-10% Complex → Large (~$0.03)
+Offline eval → Shadow mode → Canary (5%) → Rollout (100%)
+                    + непрерывный online eval + алертинг
 ```
 
-**2. Speed - -30-40% latency, -30% серверов**
-- Параллельные tools
-- Streaming (0.3s к first word vs 4s full wait)
-- Меньше шагов через DSPy
+### Agent Stack (6 уровней)
 
-**3. Limits - предсказуемый бюджет**
-- Max steps: 5-10 (жесткий лимит)
-- Timeout: 30-60s
-- Loop detection: same tool + same args → stop early
+| Уровень | Что |
+|---|---|
+| Layer 5 | UX & Trust — что видит пользователь |
+| Layer 4 | Orchestration — координация агентов и шагов |
+| Layer 3 | Tools & Integrations — MCP, APIs, databases |
+| Layer 2 | Memory & State — conversation history, RAG, long-term memory |
+| Layer 1 | Model & Inference — LLM, routing, caching |
+| Layer 0 | Infrastructure — compute, networking, monitoring |
 
-**4. Scale - -60% стоимость при 100K+ пользователей**
-- Queue + Worker Pool (async processing)
-- 3 уровня кеша:
-  - **Semantic cache**: embeddings similarity
-  - **Tool result cache**: TTL 5 min (цены не меняются каждую секунду)
-  - **LLM response cache**: exact hash match (FAQ)
+### Control Plane для агентов
 
-### Context Growth - скрытый пожиратель бюджета
-- 80% токенов = resending previous steps
-- **Решения:** summary, sliding window, lean system prompt
+Как Kubernetes имеет control plane для кластеров, агентам тоже нужен:
+- **Registry** — какие агенты существуют, их инструменты, права
+- **Router** — какой агент обрабатывает какой запрос
+- **Rate limiting & budgets** — max tokens per session, max cost per user, circuit breakers
+- **Observability** — трейсы, логи, метрики на уровне флота
+- **Governance** — аудит, approval workflows, compliance
+
+### Декомпозиция — как разбить на агентов
+
+Как в software engineering: высокая связность, низкое сцепление. Но с нюансами для стохастических систем:
+
+| # | Правило | Пример | Анти-паттерн |
+|---|---|---|---|
+| 1 | Один агент = один домен | FlightAgent ≠ BaggageAgent | God Agent с 5-страничным промптом |
+| 2 | Связь через интерфейсы, не состояние | Handoff с контрактом: `{flights: [...], intent: "..."}` | Агенты читают внутренности друг друга |
+| 3 | Один лучше двух при общем контексте | Search + booking → один агент, два инструмента | Два агента постоянно перебрасывают контекст |
+| 4 | Каждый агент тестируем в изоляции | PolicyAgent работает без FlightAgent (mock inputs) | Тестирование только вместе |
+
+### Паттерны Anthropic
+
+- **Prompt chaining** — последовательная цепочка LLM-вызовов с гейтами
+- **Routing** — роутер направляет к нужному LLM-вызову
+- **Parallelization** — параллельные вызовы + агрегатор
+- **Orchestrator-workers** — оркестратор делегирует воркерам
+- **Evaluator-optimizer** — генератор + оценщик с циклом обратной связи
+
+### Google Patterns — агенты как композируемые единицы
+
+Три уровня композиции:
+- **Single Agent** — один агент + N инструментов. 80% задач решаются здесь. Не усложняйте, пока не сломается.
+- **Multi-Agent** — специализированные агенты с ролями, координатор распределяет (LLM-driven delegation или explicit routing).
+- **Agent-as-Tool** — Агент B обёрнут как инструмент для Агента A. A вызывает `check_policy()` и получает `{allowed: true, fee: 3000}`. Инкапсуляция на уровне агента.
+
+Два механизма делегации в Google ADK:
+- **LLM-Driven Delegation** — модель читает описания под-агентов, выбирает кому делегировать. Гибко, но модель может ошибиться.
+- **AgentTool (Explicit)** — агент B обёрнут как вызываемая функция. Предсказуемо, чёткий контракт, но негибко.
+
+### Выбор фреймворка
+
+| Парадигма | Фреймворк | Описание |
+|---|---|---|
+| GRAPH | LangGraph | Узлы → рёбра. Максимальный контроль, stateful графы с чекпоинтами. Самый зрелый (80K+ stars) |
+| HIERARCHY | Google ADK, OpenAI SDK | Boss → Workers. Workflow-агенты (Sequential/Parallel/Loop) + A2A протокол |
+| CONVERSATION | CrewAI, AutoGen | Агенты общаются друг с другом. CrewAI: роли + задачи. AutoGen: GroupChat, дебаты, консенсус |
+| MCP-NATIVE | Strands (AWS) | Один коннектор для всего. Глубокая интеграция с AWS. Самый молодой |
+| COMPUTER | Claude Agent SDK | bash + файлы. Модель решает как действовать. Минимальная оркестрация, максимальная автономность |
+
+### Timeline
+
+| Год | Модели и цены | Где ценность |
+|---|---|---|
+| 2023 | GPT-4: $60/1M tokens | **Value = MODEL** |
+| 2024 | GPT-4o: $10/1M, Claude 3: $15/1M | **Value = MODEL + PROMPT** |
+| 2025 | GPT-4o-mini: $0.15/1M, DeepSeek: $0.14/1M. Inference −78% за год | **Value = The SYSTEM Around the Model** |
+| 2026 | ? | |
 
 ---
 
-## 🔐 Security & Deployment - Безопасность и развертывание
+## Production Checklist
 
-### Две принципиальные ошибки
+### Сегодня (30 мин)
+1. Tracing (LangFuse) + Metrics + Alerts — видимость с первого дня
+2. 5 eval-тестов + LLM-as-Judge — измерять качество
+3. Max steps + timeout — предотвратить runaway agents
+4. Расчёт стоимости — знать бюджет до деплоя
 
-**❌ НЕПРАВИЛЬНО:**
-```python
-get_bookings(user_id, ...)  # LLM выбирает user_id
-Agent: "get_bookings(user_id=42)"
-# Любой user_id работает → DATA LEAKED
-```
+### Эта неделя (2–3 дня)
+5. Model router — 10× экономия (Small для FAQ, Large для сложных)
+6. Fail-safe prompting — defensive instructions + structured output
+7. Tool permissions — scope per user, not per agent
+8. Canary deployment — 5% → 25% → 50% → 100% с метриками
 
-**✅ ПРАВИЛЬНО:**
-```python
-get_bookings(token, ...)  # user_id из JWT
-Agent: "get_bookings(token=eyJ...)"
-# Только свои данные → SECURE
-```
+### Следующий спринт (1–2 недели)
+9. Queue + Cache — 100K+ пользователей, −60% стоимости
+10. Shared Platform — только при 3+ агентах, не раньше
 
-### Two Security Principles
-
-1. **LLM никогда не видит secrets или PII**
-   - Нет API ключей, паролей, номеров паспорта
-   - Tool берет credentials из env
-
-2. **Authorization в коде tool, не в prompt**
-   - user_id из verified token, не из LLM аргументов
-   - Каждый tool = API endpoint со своим auth
-
-### 3 уровня защиты
-
-| Уровень | Что | Пример |
-|---------|-----|--------|
-| **1. Tool Permission** | Какие tools видит агент | search, book, profile (НЕ admin, НЕ billing) |
-| **2. Parameter Validation** | user_id из token | `get_bookings(token=JWT)` |
-| **3. Output Filtering** | Что returns | flight, price, airline (удалить internal_id) |
-
-### Canary Deployment для агентов
+### Цикл продакшена
 
 ```
-95% traffic → Stable v2
-5% traffic → Canary v3
-           ↓ (wait 1h)
-     Compare Metrics:
-     ✓ latency ≤ stable
-     ✓ eval ≥ stable  
-     ✓ errors ≤ stable
-     ✓ cost ≤ 1.2×
-           ↓ quality drop > 10%? ← AUTO ROLLBACK
-     5% → 25% → 50% → 100%
+Deploy → Monitor → Evaluate → Improve → Deploy
 ```
 
-**Почему нужен canary для LLM:**
-- Классический deploy: тесты pass → готово
-- **LLM deploy:** тесты pass, но модель ведет себя иначе на real traffic
-- Изменение prompt может тихо деградировать качество (no crash, no error, just worse answers)
-
----
-
-## 🎯 Formalization & Decision Trees
-
-### Before You Code
-
-Зафиксируйте перед написанием первой строки:
-
-1. **Input** - что приходит? (text / voice / document / structured data)
-2. **Output** - что уходит? (answer / action / document / API call)
-3. **Scope** - что агент делает и **НЕ делает**
-4. **Success criteria** - как узнать, что работает? (метрика, не "seems ok")
-5. **Edge cases** - что если input мусор? Tool упал?
-6. **Human fallback** - когда передать человеку?
-
-**Без формализации → нет eval → нет production. Просто demo.**
-
-### Do You Actually Need an Agent?
-
-```
-Does it need autonomy?
-  NO → Pipeline / workflow
-  
-Does it need external tools?
-  NO → Single LLM call
-  
-Does it need multi-step reasoning?
-  NO → Prompt chain
-  
-YES to all → AGENT
-```
-
-### AI Agents ≠ Software
-
-| Software | AI Agents |
-|----------|-----------|
-| Same input → same output | Same input → different output |
-| Unit tests, binary pass/fail | Statistical testing (94% success) |
-| Bugs reproducible | Errors may not reproduce |
-| Ship → works | **Ship → monitor → iterate** |
-| Engineer programs behavior | **Engineer designs environment** |
-
-**AI Agents = ML + Backend**
-
----
-
-## 🏗️ Architecture & Patterns
-
-### Agent Stack (6 слоев)
-
-```
-Layer 5: UX & Trust (что видит пользователь)
-Layer 4: Orchestration (координация агентов и шагов)
-Layer 3: Tools & Integrations (MCP, APIs, databases)
-Layer 2: Memory & State (history, RAG, session state)
-Layer 1: Model & Inference (LLM, routing, caching)
-Layer 0: Infrastructure (compute, networking, monitoring)
-```
-
-### Control Plane for Agents
-
-(как Kubernetes control plane для кластеров)
-
-- **Registry:** какие агенты, их tools, permissions, scope
-- **Router:** какой агент обрабатывает запрос (+ model routing)
-- **Rate limiting & budgets:** max tokens/session, max cost/user, circuit breakers
-- **Observability:** traces, logs, metrics на уровне fleet, не per-agent
-- **Governance:** audit trail, approval workflows, compliance
-
-### Decomposition - как разделить на несколько агентов
-
-| # | Правило | Пример | Anti-pattern |
-|---|---------|--------|-------------|
-| 1 | One agent = one domain | FlightAgent ≠ BaggageAgent | God Agent: всё знает, 5 page prompt |
-| 2 | Через interfaces, не state | Handoff: {flights: [...], intent: "..."} | Agents читают друг друга internals |
-| 3 | Одно лучше двух если context общий | Search + booking в одном agentе | Два агента постоянно pass context |
-| 4 | Каждый testable solo | PolicyAgent работает без FlightAgent | Только вместе тестируются |
-
-### Workflow Patterns (Anthropic)
-
-1. **Prompt Chaining** - LLM Call → Gate → LLM Call → ... → Output
-2. **Routing** - Router выбирает какой LLM вызвать
-3. **Parallelization** - 3 LLM вызова параллельно → Aggregator
-4. **Orchestrator-Workers** - Orchestrator координирует Workers + Gates
-5. **Evaluator-Optimizer** - Generator создает, Evaluator проверяет, feedback loop
-
-### Framework Comparison
-
-| Парадигма | Фреймворк | Подход |
-|-----------|-----------|--------|
-| **Graph** | LangGraph | Nodes → Edges. Максимум контроля, максимум boilerplate. 80K+ stars, production готов |
-| **Conversation** | CrewAI, AutoGen | Agents разговаривают. Fast prototyping, least predictable |
-| **Hierarchy** | Google ADK, OpenAI SDK | Boss → Workers. Coordinator делегирует. Clear contracts |
-| **Computer** | Claude Agent SDK | bash + files. Model решает как действовать. Minimal orchestration |
-| **MCP-Native** | Strands (AWS) | MCP everywhere. One connector for tools, integrations, agents |
-
----
-
-## 📋 Production Checklist
-
-### Today (30 min) - Agent can be deployed
-1. **Tracing** (LangFuse) + per-step visibility
-2. **5-10 eval tests** + LLM-as-Judge
-3. **Max steps** + timeout
-4. **Cost calculation** (know your budget)
-
-### This Week (2-3 days) - Production-ready
-5. **Model router** (rules/classifier/LLM)
-6. **Fail-safe prompting** + structured output
-7. **Tool permissions** (scope per user)
-8. **Canary deployment** (5% → 100%)
-
-### Next Sprint (1-2 weeks) - Scale
-9. **Queue + Cache** (handle 100K+ users, -60% cost)
-10. **Shared Platform** (only with 3+ agents)
-
----
-
-## 🔄 Production is a Cycle
-
-```
-Deploy (Canary 5% → 100%)
-   ↑                        ↓
-Improve (Optimize + Fix) → Monitor (Traces + Metrics)
-   ↑                        ↓
-                      Evaluate (Eval Pipeline + DSPy)
-```
-
-**Итерации:**
+Примеры итераций:
 - Iter 1: p95=12s → cache → 6s
 - Iter 2: eval 4.1→3.4 → DSPy → 4.3
 - Iter 3: cost $120→$50 → fix router
 
 ---
 
-## 📈 Evolution: Prototype → Platform
+## Ссылки
 
-| Stage | Что | Масштаб |
-|-------|-----|---------|
-| **Stage 1: Prototype** | ReAct + 3 tools, Jupyter | 1 агент |
-| **Stage 2: Production** | + Traces + Eval + Limits + Security + Canary | 100K users |
-| **Stage 3: Platform** | + Shared infra, 4+ agents | 1 week per new agent (вместо 3 месяцев) |
-
-**Каждый stage имеет смысл только после предыдущей!**
-
----
-
-## ⏰ Timeline: Value Shift
-
-```
-2023: VALUE = MODEL
-      GPT-4: $60/1M tokens
-
-2024: VALUE = MODEL + PROMPT
-      GPT-4o: $10/1M | Claude 3: $15/1M
-
-2025: VALUE = SYSTEM AROUND MODEL ← YOU ARE HERE
-      GPT-4o-mini: $0.15/1M | DeepSeek: $0.14/1M
-      Inference: -78% за год
-      
-2026: VALUE = ???
-      Control plane, orchestration, governance
-```
-
----
-
-## 🎓 Key Takeaways
-
-✅ **Formalize before you code** - input, output, scope, success criteria  
-✅ **Start observability on Day 1** - traces > dashboards  
-✅ **Measure quality statistically** - offline + online eval together  
-✅ **Design for costs upfront** - calculate CPS, know your budget  
-✅ **Expect to iterate in production** - ship → monitor → improve  
-✅ **Security = infrastructure, not prompts** - tokens don't see secrets  
-✅ **Single agent 80% of the time** - don't over-engineer early  
-✅ **Value is shifting from model to system** - 2025 is about orchestration, not just fine-tuning
-
----
-
-## 🔗 Полезные ресурсы и ссылки
-
-### Инструменты и платформы для Observability
-
-- **LangFuse** - https://langfuse.com - Open-source трейсинг + промпт менеджмент + эвалюация
-- **Grafana** - https://grafana.com - Open-source мониторинг, dashboards и alerts
-
-### Архитектура и паттерны агентов (от Anthropic)
-
-- **Building Effective Agents** - https://www.anthropic.com/engineering/building-effective-agents
-  - Официальное руководство с workflow паттернами (prompt chaining, routing, parallelization, orchestrator-workers, evaluator-optimizer)
-  
-- **Claude Cookbook - Agent Patterns** - https://github.com/anthropics/claude-cookbooks/tree/main/patterns/agents
-  - Примеры кода и паттерны для реализации различных типов агентов
-
-### Google Design Patterns для agentic AI
-
-- **Choose Design Pattern for Agentic AI System** - https://docs.cloud.google.com/architecture/choose-design-pattern-agentic-ai-system
-  - Архитектурное руководство по выбору правильного паттерна
-
-- **Multi-Agent Patterns in ADK** - https://developers.googleblog.com/developers-guide-to-multi-agent-patterns-in-adk/
-  - Гайд по многоагентным системам с примерами
-
-### Книги
-
-- **Agentic Design Patterns: A Hands-On Guide to Building Intelligent Systems** by Antonio Gulli
-  - Полное руководство по проектированию агентов и agentic систем
+- Anthropic — Building effective agents: https://www.anthropic.com/engineering/building-effective-agents
+- Anthropic Claude Cookbooks (patterns/agents): https://github.com/anthropics/claude-cookbooks/tree/main/patterns/agents
+- Google — Choosing design patterns for agentic AI: https://docs.cloud.google.com/architecture/choose-design-pattern-agentic-ai-system
+- Google Developers Blog — Multi-agent patterns in ADK: https://developers.googleblog.com/developers-guide-to-multi-agent-patterns-in-adk/
+- LangFuse: https://langfuse.com
+- Grafana: https://grafana.com
+- DSPy: https://dspy.ai
